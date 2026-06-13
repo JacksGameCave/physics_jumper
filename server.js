@@ -21,6 +21,11 @@ const SHOOT_COOLDOWN = 8;
 const BULLET_DAMAGE = 5;
 const MAX_HP = 20;
 const RESPAWN_TIME = 3000;
+const MAX_PLAYERS = 4;
+
+// Spawn x positions for slots 0..3
+const SPAWN_X = [200, 700, 480, 200];
+const SPAWN_X_GREEN = 700;
 
 const platforms = [
   { x: 0, y: 580, w: 960, h: 60 },
@@ -36,15 +41,33 @@ const platforms = [
   { x: 600, y: 100, w: 100, h: 16 },
 ];
 
-const players = {};
+// ── Players & lobby ──
+const players = {};        // id -> player (in-game)
+const lobby = [];          // array of player entries { id, slot (assigned at promotion), ws, name }
+const wsToPlayer = new Map(); // ws -> { id, inLobby: bool, lobbyIdx: number }
 const bullets = [];
 let nextBulletId = 0;
+let nextPlayerId = 0;
+
+function getActivePlayerCount() {
+  return Object.keys(players).length;
+}
+
+function findFreeSlot() {
+  // Returns the lowest slot number 0..MAX_PLAYERS-1 that has no active player
+  for (let i = 0; i < MAX_PLAYERS; i++) {
+    const id = 'p' + i;
+    if (!players[id]) return i;
+  }
+  return -1;
+}
 
 function createPlayer(id, slot) {
+  const spawnX = SPAWN_X[slot] !== undefined ? SPAWN_X[slot] : 400;
   return {
     id,
-    slot,                        // 0 = blue, 1 = red
-    x: slot === 0 ? 200 : 700,
+    slot,
+    x: spawnX,
     y: 400,
     w: 48, h: 52,
     vx: 0, vy: 0,
@@ -60,11 +83,13 @@ function createPlayer(id, slot) {
     mouseX: 480, mouseY: 320,
     shooting: false,
     respawnTimer: 0,
+    invulnTimer: 0,  // seconds of invincibility remaining
   };
 }
 
 function respawnPlayer(p) {
-  p.x = p.slot === 0 ? 200 : 700;
+  const spawnX = SPAWN_X[p.slot] !== undefined ? SPAWN_X[p.slot] : 400;
+  p.x = spawnX;
   p.y = 400;
   p.vx = 0;
   p.vy = 0;
@@ -72,43 +97,177 @@ function respawnPlayer(p) {
   p.alive = true;
   p.shootCooldown = 0;
   p.recoilTimer = 0;
+  p.invulnTimer = 1.5;  // 1.5 seconds of spawn invincibility
 }
 
-// ── Connections ──
-let slotCounter = 0;
+function promoteFromLobby() {
+  // If game has open slot and lobby has people, promote first lobby player
+  // (used on disconnect to fill a free slot)
+  if (lobby.length === 0) return null;
+  const slot = findFreeSlot();
+  if (slot === -1) return null;
 
-wss.on('connection', (ws) => {
-  if (Object.keys(players).length >= 2) {
-    ws.send(JSON.stringify({ type: 'full' }));
-    ws.close();
-    return;
-  }
-
-  const slot = slotCounter % 2;
-  slotCounter++;
+  const entry = lobby.shift();
   const id = 'p' + slot;
+  const player = createPlayer(id, slot);
+  player._ws = entry.ws;
+  players[id] = player;
+  entry.ws.playerId = id;
+  entry.ws.inLobby = false;
+  wsToPlayer.set(entry.ws, { id, inLobby: false, lobbyIdx: 0 });
 
-  // If slot taken, give other slot
-  const actualSlot = players[`p0`] ? 1 : (players[`p1`] ? 0 : slot);
-  const actualId = 'p' + actualSlot;
+  // Update lobby indices for the rest
+  for (let i = 0; i < lobby.length; i++) lobby[i].lobbyIdx = i;
 
-  const player = createPlayer(actualId, actualSlot);
-  players[actualId] = player;
-  ws.playerId = actualId;
+  // Tell them they joined
+  entry.ws.send(JSON.stringify({
+    type: 'promoted',
+    id,
+    slot,
+  }));
 
-  ws.send(JSON.stringify({
+  broadcastLobby();
+
+  return { entry, id, slot };
+}
+
+// Swap a dead player with the first lobby player.
+// Dead player -> back of lobby (new id).
+// First lobby player -> takes the dead player's slot.
+function swapDeadWithLobby(playerId) {
+  const p = players[playerId];
+  if (!p) return null;
+  if (lobby.length === 0) return null;
+
+  const slot = p.slot;
+  const deadInfo = wsToPlayer.get(p._ws);
+  if (!deadInfo) return null;
+  const deadWs = p._ws;
+
+  // Remove dead player from game
+  delete players[playerId];
+  wsToPlayer.delete(deadWs);
+  deadWs.playerId = null;
+
+  // Pop first lobby player
+  const promotedEntry = lobby.shift();
+  // Create the new in-game player for the promoted lobby player
+  const newPlayer = createPlayer('p' + slot, slot);
+  newPlayer._ws = promotedEntry.ws;
+  players['p' + slot] = newPlayer;
+  wsToPlayer.set(promotedEntry.ws, { id: 'p' + slot, inLobby: false, lobbyIdx: 0 });
+  promotedEntry.ws.playerId = 'p' + slot;
+  promotedEntry.ws.inLobby = false;
+
+  // Notify the promoted player — use 'init' so the client goes through the
+  // same setup path as a fresh join (which is known to work correctly).
+  promotedEntry.ws.send(JSON.stringify({
     type: 'init',
-    id: actualId,
-    slot: actualSlot,
+    id: 'p' + slot,
+    slot,
     platforms,
   }));
 
-  console.log(`Player ${actualId} connected (${actualSlot === 0 ? 'BLUE' : 'RED'})`);
+  // Add the dead player to back of lobby with a new id
+  const newDeadId = 'p' + (nextPlayerId++);
+  const deadLobbyEntry = {
+    ws: deadWs,
+    id: newDeadId,
+    lobbyIdx: lobby.length,
+  };
+  lobby.push(deadLobbyEntry);
+  wsToPlayer.set(deadWs, { id: newDeadId, inLobby: true, lobbyIdx: lobby.length - 1 });
+  deadWs.playerId = newDeadId;
+  deadWs.inLobby = true;
+
+  // Update lobby indices for remaining lobby entries
+  for (let i = 0; i < lobby.length; i++) lobby[i].lobbyIdx = i;
+
+  // Notify dead player they're in lobby
+  deadWs.send(JSON.stringify({
+    type: 'lobby',
+    id: newDeadId,
+    position: deadLobbyEntry.lobbyIdx + 1,
+    inGame: getActivePlayerCount(),
+    maxGame: MAX_PLAYERS,
+    lobbyCount: lobby.length,
+  }));
+
+  // Broadcast updated lobby positions
+  broadcastLobby();
+
+  return { promotedId: 'p' + slot, deadId: newDeadId };
+}
+
+function broadcastLobby() {
+  // Send lobby update to all clients
+  for (const [ws, info] of wsToPlayer.entries()) {
+    if (ws.readyState !== ws.OPEN) continue;
+    ws.send(JSON.stringify({
+      type: 'lobby_update',
+      inGame: getActivePlayerCount(),
+      maxGame: MAX_PLAYERS,
+      lobbyCount: lobby.length,
+      youInLobby: info.inLobby,
+      yourLobbyPos: info.inLobby ? (lobby.findIndex(e => e.ws === ws) + 1) : 0,
+    }));
+  }
+}
+
+// ── Connections ──
+wss.on('connection', (ws) => {
+  // Assign a new id
+  const id = 'p' + (nextPlayerId++);
+  ws.playerId = id;
+  ws.inLobby = false;
+
+  const active = getActivePlayerCount();
+
+  if (active < MAX_PLAYERS) {
+    // Join game
+    const slot = findFreeSlot();
+    const player = createPlayer('p' + slot, slot);
+    player._ws = ws;  // track the owning websocket for lobby swap
+    players['p' + slot] = player;
+    ws.playerId = 'p' + slot;
+    wsToPlayer.set(ws, { id: 'p' + slot, inLobby: false, lobbyIdx: 0 });
+
+    ws.send(JSON.stringify({
+      type: 'init',
+      id: 'p' + slot,
+      slot,
+      platforms,
+    }));
+    console.log(`Player p${slot} connected (slot ${slot})`);
+  } else {
+    // Join lobby
+    const entry = {
+      ws,
+      id,
+      lobbyIdx: lobby.length,
+    };
+    lobby.push(entry);
+    wsToPlayer.set(ws, { id, inLobby: true, lobbyIdx: lobby.length - 1 });
+
+    ws.send(JSON.stringify({
+      type: 'lobby',
+      id,
+      position: lobby.length,
+      inGame: active,
+      maxGame: MAX_PLAYERS,
+      lobbyCount: lobby.length,
+    }));
+    console.log(`Player queued to lobby (#${lobby.length})`);
+  }
+
+  broadcastLobby();
 
   ws.on('message', (data) => {
     try {
       const msg = JSON.parse(data);
-      const p = players[ws.playerId];
+      const info = wsToPlayer.get(ws);
+      if (!info || info.inLobby) return; // Lobby players can't affect the game
+      const p = players[info.id];
       if (!p) return;
 
       if (msg.type === 'input') {
@@ -122,8 +281,25 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
-    console.log(`Player ${ws.playerId} disconnected`);
-    delete players[ws.playerId];
+    const info = wsToPlayer.get(ws);
+    if (!info) return;
+
+    if (info.inLobby) {
+      // Remove from lobby and update queue positions
+      const idx = lobby.findIndex(e => e.ws === ws);
+      if (idx !== -1) {
+        lobby.splice(idx, 1);
+        for (let i = idx; i < lobby.length; i++) lobby[i].lobbyIdx = i;
+      }
+    } else {
+      // Player disconnected from game: clean removal, no lobby promotion.
+      // (Lobby promotion only happens on death now.)
+      const p = players[info.id];
+      if (p) delete players[info.id];
+    }
+    wsToPlayer.delete(ws);
+    broadcastLobby();
+    console.log(`Player ${info.id} disconnected`);
   });
 });
 
@@ -139,8 +315,15 @@ function tick() {
     if (!p.alive) {
       p.respawnTimer -= 1000 / TICK_RATE;
       if (p.respawnTimer <= 0) {
-        respawnPlayer(p);
-        events.push({ type: 'respawn', id });
+        // Death -> swap with first lobby player (if any).
+        // Dead player goes to back of lobby, first lobby player takes their slot.
+        if (lobby.length > 0) {
+          events.push({ type: 'death', id, killer: null, fell: false, replaced: true });
+          swapDeadWithLobby(id);
+        } else {
+          respawnPlayer(p);
+          events.push({ type: 'respawn', id });
+        }
       }
       continue;
     }
@@ -157,6 +340,7 @@ function tick() {
     // Shooting
     if (p.shootCooldown > 0) p.shootCooldown--;
     if (p.recoilTimer > 0) p.recoilTimer--;
+    if (p.invulnTimer > 0) p.invulnTimer = Math.max(0, p.invulnTimer - (1000 / TICK_RATE) / 1000);
 
     if (p.shooting && p.shootCooldown <= 0) {
       p.shootCooldown = SHOOT_COOLDOWN;
@@ -255,9 +439,11 @@ function tick() {
         if (id === b.owner) continue;
         const p = players[id];
         if (!p.alive) continue;
+        if (p.invulnTimer > 0) continue;  // immune to damage while invuln
         if (b.x > p.x && b.x < p.x + p.w && b.y > p.y && b.y < p.y + p.h) {
           remove = true;
           p.hp -= BULLET_DAMAGE;
+          p.invulnTimer = 0.3;  // 0.3s of hit invincibility
           events.push({ type: 'hit', target: id, x: b.x, y: b.y, hp: p.hp });
 
           if (p.hp <= 0) {
@@ -267,7 +453,7 @@ function tick() {
             p.deaths++;
             const killer = players[b.owner];
             if (killer) killer.kills++;
-            events.push({ type: 'death', id, killer: b.owner });
+            events.push({ type: 'death', id, killer: b.owner, fell: false });
           }
           break;
         }
@@ -276,6 +462,12 @@ function tick() {
 
     if (remove) bullets.splice(i, 1);
   }
+
+  // Handle players whose respawnTimer just hit 0 (in this tick) — actually we did it above
+  // Now check for death-triggered lobby promotion (when player.hp hit 0 this tick)
+  // The above "death" event was emitted, but we need to also check if any player JUST died
+  // Actually, players don't respawn from hp=0 — they go to "dying" state and on next respawnTimer expiry
+  // we check lobby. So lobby promotion happens after the respawn timer.
 
   // Broadcast state
   const state = {
@@ -297,6 +489,7 @@ function tick() {
       deaths: p.deaths,
       onGround: p.onGround,
       recoilTimer: p.recoilTimer,
+      invulnTimer: p.invulnTimer,
       slot: p.slot,
     };
   }
@@ -311,8 +504,7 @@ setInterval(tick, 1000 / TICK_RATE);
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n🦆 Duck Fight server running!`);
+  console.log(`\n🦆 Duck Fight server running! (max ${MAX_PLAYERS} players, unlimited lobby)`);
   console.log(`   Local:   http://localhost:${PORT}`);
-  console.log(`   Network: http://<your-ip>:${PORT}`);
-  console.log(`\n   Open in 2 browser tabs/windows to play!\n`);
+  console.log(`   Network: http://<your-ip>:${PORT}\n`);
 });

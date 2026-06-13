@@ -65,7 +65,27 @@
     margin-bottom: 10px; font-size: 16px;
     padding: 6px 16px; background: #1a1a3e; border-radius: 6px;
     border: 1px solid #333;
+    z-index: 200;
   }
+  #lobby-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 12, 41, 0.85);
+    z-index: 500;
+    justify-content: center;
+    align-items: center;
+    flex-direction: column;
+    text-align: center;
+    color: #fff;
+    font-family: monospace;
+    padding: 20px;
+  }
+  #lobby-overlay.show { display: flex; }
+  #lobby-overlay h1 { font-size: 28px; margin-bottom: 12px; color: #ffcc00; }
+  #lobby-overlay p { font-size: 16px; margin: 4px 0; }
+  #lobby-overlay .pos { color: #ffaa00; font-weight: bold; font-size: 22px; margin: 16px 0; }
+  #lobby-overlay .dots { font-size: 32px; letter-spacing: 4px; margin-top: 12px; }
   .waiting { color: #ffcc00; }
   .connected { color: #2ecc71; }
   .dead { color: #e74c3c; }
@@ -73,6 +93,13 @@
 </head>
 <body>
 <div id="status" class="waiting">Connecting...</div>
+<div id="lobby-overlay">
+  <h1>⏳ IN LOBBY</h1>
+  <p>Waiting for a player to die...</p>
+  <div class="pos" id="lobby-position">Position: --</div>
+  <p id="lobby-gameinfo">--</p>
+  <div class="dots" id="lobby-dots">• • •</div>
+</div>
 <div id="game-wrapper">
   <canvas id="game"></canvas>
 </div>
@@ -125,8 +152,33 @@ let mySlot = -1;
 let platforms = [];
 let serverState = { players: {}, bullets: [], events: [] };
 let connected = false;
+let inLobby = false;
+let lobbyPos = 0;
+let gameInfo = { inGame: 0, maxGame: 4, lobbyCount: 0 };
 
-ws.onopen = () => { statusEl.textContent = 'Waiting for opponent...'; statusEl.className = 'waiting'; };
+// ── Color config for slots 0-3 ──
+const SLOT_COLORS = [
+  { name: 'BLUE',   body: '#4488ff', dark: '#2266cc', light: '#88bbff', icon: '🔵',
+    gunBody: '#4466aa', gunBarrel: '#335599', gunHighlight: '#5577bb',
+    deathPal: ['#4488ff','#66aaff','#2266dd','#ffffff'] },
+  { name: 'RED',    body: '#ee4444', dark: '#bb2222', light: '#ff8888', icon: '🔴',
+    gunBody: '#aa4444', gunBarrel: '#993333', gunHighlight: '#bb5555',
+    deathPal: ['#ff4444','#ff6666','#dd2222','#ffffff'] },
+  { name: 'YELLOW', body: '#f5c542', dark: '#d4a830', light: '#fae08a', icon: '🟡',
+    gunBody: '#b89930', gunBarrel: '#997a20', gunHighlight: '#d4b050',
+    deathPal: ['#f5c542','#fae08a','#d4a830','#ffffff'] },
+  { name: 'GREEN',  body: '#2d7a3a', dark: '#1a5525', light: '#5faa6a', icon: '🟢',
+    gunBody: '#3a6a3a', gunBarrel: '#2a4a2a', gunHighlight: '#5a8a5a',
+    deathPal: ['#2d7a3a','#5faa6a','#1a5525','#ffffff'] },
+];
+function slotColor(slot) { return SLOT_COLORS[slot] || SLOT_COLORS[0]; }
+
+const lobbyOverlay = document.getElementById('lobby-overlay');
+const lobbyPositionEl = document.getElementById('lobby-position');
+const lobbyGameInfoEl = document.getElementById('lobby-gameinfo');
+const lobbyDotsEl = document.getElementById('lobby-dots');
+
+ws.onopen = () => { statusEl.textContent = 'Connecting...'; statusEl.className = 'waiting'; };
 ws.onclose = () => { statusEl.textContent = 'Disconnected'; statusEl.className = 'dead'; connected = false; };
 ws.onerror = () => { statusEl.textContent = 'Connection error'; statusEl.className = 'dead'; };
 
@@ -138,12 +190,59 @@ ws.onmessage = (e) => {
     mySlot = msg.slot;
     platforms = msg.platforms;
     connected = true;
-    statusEl.textContent = `You are ${mySlot === 0 ? '🔵 BLUE' : '🔴 RED'} Duck — Waiting for opponent...`;
+    inLobby = false;
+    lobbyOverlay.classList.remove('show');
+    const sc = slotColor(mySlot);
+    statusEl.textContent = `You are ${sc.icon} ${sc.name} Duck — Waiting for players...`;
     statusEl.className = 'waiting';
   }
 
+  if (msg.type === 'lobby') {
+    inLobby = true;
+    myId = msg.id;
+    mySlot = -1;
+    const ig = msg.inGame ?? 0;
+    const mg = msg.maxGame ?? 4;
+    const lc = msg.lobbyCount ?? msg.position ?? 0;
+    gameInfo.inGame = ig;
+    gameInfo.maxGame = mg;
+    gameInfo.lobbyCount = lc;
+    lobbyPos = msg.position;
+    lobbyOverlay.classList.add('show');
+    lobbyPositionEl.textContent = `Queue Position: #${msg.position}`;
+    lobbyGameInfoEl.textContent = `${ig} / ${mg} players in game · ${lc} waiting`;
+    statusEl.textContent = 'In Lobby — waiting to join';
+    statusEl.className = 'waiting';
+  }
+
+  if (msg.type === 'promoted') {
+    inLobby = false;
+    myId = msg.id;
+    mySlot = msg.slot;
+    connected = true;
+    if (msg.platforms) platforms = msg.platforms;
+    lobbyOverlay.classList.remove('show');
+    const sc = slotColor(mySlot);
+    statusEl.textContent = `You are ${sc.icon} ${sc.name} Duck — FIGHT!`;
+    statusEl.className = 'connected';
+  }
+
+  if (msg.type === 'lobby_update') {
+    const ig = msg.inGame ?? 0;
+    const mg = msg.maxGame ?? 4;
+    const lc = msg.lobbyCount ?? 0;
+    gameInfo.inGame = ig;
+    gameInfo.maxGame = mg;
+    gameInfo.lobbyCount = lc;
+    if (inLobby) {
+      lobbyPos = msg.yourLobbyPos;
+      lobbyPositionEl.textContent = `Queue Position: #${lobbyPos}`;
+      lobbyGameInfoEl.textContent = `${ig} / ${mg} players in game · ${lc} waiting`;
+    }
+  }
+
   if (msg.type === 'full') {
-    statusEl.textContent = 'Server full (2/2 players)';
+    statusEl.textContent = 'Server full';
     statusEl.className = 'dead';
   }
 
@@ -211,23 +310,31 @@ ws.onmessage = (e) => {
       if (ev.type === 'death') {
         const dp = msg.players[ev.id];
         if (dp) {
+          const sc = slotColor(dp.slot);
           for (let k = 0; k < 20; k++) {
             const a = Math.random() * Math.PI * 2;
             const spd = 2 + Math.random() * 6;
-            const col = dp.slot === 0 ? ['#4488ff','#66aaff','#2266dd','#ffffff'] : ['#ff4444','#ff6666','#dd2222','#ffffff'];
             particles.push({
               x: dp.x + 24, y: dp.y + 26,
               vx: Math.cos(a) * spd, vy: Math.sin(a) * spd - 3,
               life: 25 + Math.random() * 20, maxLife: 45,
               size: 3 + Math.random() * 5,
-              color: col[Math.floor(Math.random() * col.length)],
+              color: sc.deathPal[Math.floor(Math.random() * sc.deathPal.length)],
             });
           }
           addShake(8, 10);
+          // killer is "p0".."p3" - find that slot
+          let killerSlot = 0;
+          if (ev.killer === 'p1') killerSlot = 1;
+          else if (ev.killer === 'p2') killerSlot = 2;
+          else if (ev.killer === 'p3') killerSlot = 3;
+          const kName = ev.killer ? slotColor(killerSlot).name : '???';
           deathMessages.push({
             text: ev.fell
-              ? `${dp.slot === 0 ? 'BLUE' : 'RED'} fell off!`
-              : `${ev.killer === 'p0' ? 'BLUE' : 'RED'} killed ${dp.slot === 0 ? 'BLUE' : 'RED'}!`,
+              ? `${sc.name} fell off!`
+              : ev.replaced
+                ? `${sc.name} was removed → lobby player joined!`
+                : `${kName} killed ${sc.name}!`,
             life: 180,
           });
         }
@@ -236,16 +343,16 @@ ws.onmessage = (e) => {
       if (ev.type === 'respawn') {
         const rp = msg.players[ev.id];
         if (rp) {
+          const sc = slotColor(rp.slot);
           for (let k = 0; k < 12; k++) {
             const a = Math.random() * Math.PI * 2;
             const spd = 1 + Math.random() * 3;
-            const col = rp.slot === 0 ? '#4488ff' : '#ff4444';
             particles.push({
               x: rp.x + 24, y: rp.y + 26,
               vx: Math.cos(a) * spd, vy: Math.sin(a) * spd - 1,
               life: 20 + Math.random() * 10, maxLife: 30,
               size: 3 + Math.random() * 3,
-              color: col,
+              color: sc.body,
             });
           }
         }
@@ -255,7 +362,8 @@ ws.onmessage = (e) => {
     // Update status
     const pCount = Object.keys(msg.players).length;
     if (pCount < 2) {
-      statusEl.textContent = `You are ${mySlot === 0 ? '🔵 BLUE' : '🔴 RED'} Duck — Waiting for opponent...`;
+      const sc = slotColor(mySlot);
+      statusEl.textContent = `You are ${sc.icon} ${sc.name} Duck — Waiting for players... (${pCount}/2)`;
       statusEl.className = 'waiting';
     } else {
       const me = msg.players[myId];
@@ -263,7 +371,8 @@ ws.onmessage = (e) => {
         statusEl.textContent = `💀 RESPAWNING...`;
         statusEl.className = 'dead';
       } else {
-        statusEl.textContent = `You are ${mySlot === 0 ? '🔵 BLUE' : '🔴 RED'} Duck — FIGHT!`;
+        const sc = slotColor(mySlot);
+        statusEl.textContent = `You are ${sc.icon} ${sc.name} Duck — FIGHT! (${pCount}/4)`;
         statusEl.className = 'connected';
       }
     }
@@ -419,6 +528,7 @@ function handleJoystickMove(touch) {
 // Send input to server
 setInterval(() => {
   if (!connected || ws.readyState !== 1) return;
+  if (inLobby) return; // lobby players don't send input
   ws.send(JSON.stringify({
     type: 'input',
     left: keys['a'] || keys['arrowleft'] || joystickInput.left,
@@ -489,16 +599,15 @@ function createDuckSprite(flip, bodyColor, darkColor, bellyColor) {
   return c;
 }
 
-// Blue duck sprites
-const blueR = createDuckSprite(false, '#4488ff', '#2266cc', '#88bbff');
-const blueL = createDuckSprite(true, '#4488ff', '#2266cc', '#88bbff');
-// Red duck sprites
-const redR = createDuckSprite(false, '#ee4444', '#bb2222', '#ff8888');
-const redL = createDuckSprite(true, '#ee4444', '#bb2222', '#ff8888');
+// Pre-build duck sprites for all 4 slots (right and left)
+const duckSprites = SLOT_COLORS.map(c => ({
+  r: createDuckSprite(false, c.body, c.dark, c.light),
+  l: createDuckSprite(true,  c.body, c.dark, c.light),
+}));
 
 function getSprite(slot, facingRight) {
-  if (slot === 0) return facingRight ? blueR : blueL;
-  return facingRight ? redR : redL;
+  const s = duckSprites[slot] || duckSprites[0];
+  return facingRight ? s.r : s.l;
 }
 
 // ── Draw ──
@@ -511,15 +620,16 @@ function drawGun(cx, cy, angle, facingRight, recoilTimer, slot) {
   const kick = recoilTimer > 0 ? recoilTimer * 2 : 0;
 
   // Gun body
-  ctx.fillStyle = slot === 0 ? '#4466aa' : '#aa4444';
+  const sc = slotColor(slot);
+  ctx.fillStyle = sc.gunBody;
   ctx.fillRect(8 - kick, -4, 24, 8);
-  ctx.fillStyle = slot === 0 ? '#335599' : '#993333';
+  ctx.fillStyle = sc.gunBarrel;
   ctx.fillRect(28 - kick, -3, 8, 6);
   ctx.fillStyle = '#665544';
   ctx.fillRect(10 - kick, 2, 6, 8);
   ctx.fillStyle = '#333344';
   ctx.fillRect(34 - kick, -2, 3, 4);
-  ctx.fillStyle = slot === 0 ? '#5577bb' : '#bb5555';
+  ctx.fillStyle = sc.gunHighlight;
   ctx.fillRect(10 - kick, -4, 20, 2);
 
   ctx.restore();
@@ -656,11 +766,32 @@ function draw() {
       sx = 1 + t * 0.15;
       sy = 1 - t * 0.1;
     }
+    // Invincibility flash effect
+    const invuln = p.invulnTimer || 0;
+    const flashing = invuln > 0 && Math.floor(Date.now() / 80) % 2 === 0;
     ctx.save();
     ctx.translate(p.x + 24, p.y + 52);
     ctx.scale(sx, sy);
-    ctx.drawImage(sprite, -24, -52, 48, 52);
+    if (flashing) {
+      ctx.globalAlpha = 0.4;
+      ctx.drawImage(sprite, -24, -52, 48, 52);
+      ctx.globalAlpha = 1;
+    } else {
+      ctx.drawImage(sprite, -24, -52, 48, 52);
+    }
     ctx.restore();
+
+    // Invincibility shield ring
+    if (invuln > 0) {
+      ctx.save();
+      ctx.globalAlpha = 0.5 + Math.sin(Date.now() * 0.02) * 0.25;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(p.x + 24, p.y + 26, 32, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
 
     // HP bar
     const barW = 48;
@@ -677,7 +808,8 @@ function draw() {
     ctx.strokeRect(barX, barY, barW, barH);
 
     // Name tag
-    ctx.fillStyle = p.slot === 0 ? '#4488ff' : '#ee4444';
+    const sc = slotColor(p.slot);
+    ctx.fillStyle = sc.body;
     ctx.font = 'bold 12px monospace';
     ctx.textAlign = 'center';
     const label = (id === myId ? '► YOU ◄' : 'ENEMY') + ` [${Math.max(0,p.hp)}HP]`;
@@ -694,7 +826,8 @@ function draw() {
   ctx.globalAlpha = 1;
 
   // Crosshair
-  ctx.strokeStyle = mySlot === 0 ? '#4488ff' : '#ee4444';
+  const myColor = inLobby ? '#888888' : slotColor(mySlot).body;
+  ctx.strokeStyle = myColor;
   ctx.lineWidth = 2;
   ctx.beginPath();
   ctx.arc(mouse.x, mouse.y, 12, 0, Math.PI * 2);
@@ -705,28 +838,32 @@ function draw() {
   ctx.moveTo(mouse.x, mouse.y - 18); ctx.lineTo(mouse.x, mouse.y - 8);
   ctx.moveTo(mouse.x, mouse.y + 8); ctx.lineTo(mouse.x, mouse.y + 18);
   ctx.stroke();
-  ctx.fillStyle = mySlot === 0 ? '#4488ff' : '#ee4444';
+  ctx.fillStyle = myColor;
   ctx.fillRect(mouse.x - 1, mouse.y - 1, 3, 3);
 
   // ── Scoreboard ──
+  const sbX = canvas.width - 230;
+  const sbW = 220;
+  const sbH = 100;
   ctx.fillStyle = 'rgba(0,0,0,0.5)';
-  ctx.fillRect(canvas.width - 220, 10, 210, 80);
+  ctx.fillRect(sbX, 10, sbW, sbH);
   ctx.strokeStyle = '#555';
   ctx.lineWidth = 1;
-  ctx.strokeRect(canvas.width - 220, 10, 210, 80);
+  ctx.strokeRect(sbX, 10, sbW, sbH);
 
   ctx.font = 'bold 14px monospace';
   ctx.fillStyle = '#ffffff';
-  ctx.fillText('SCOREBOARD', canvas.width - 210, 28);
+  ctx.fillText('SCOREBOARD', sbX + 10, 28);
 
   let row = 0;
   for (const id in sPlayers) {
     const p = sPlayers[id];
-    ctx.fillStyle = p.slot === 0 ? '#4488ff' : '#ee4444';
-    const name = p.slot === 0 ? 'BLUE' : 'RED';
+    const sc = slotColor(p.slot);
+    ctx.fillStyle = sc.body;
+    const name = sc.name;
     const tag = id === myId ? ' (YOU)' : '';
-    ctx.font = '12px monospace';
-    ctx.fillText(`${name}${tag}: K:${p.kills} D:${p.deaths}`, canvas.width - 210, 48 + row * 18);
+    ctx.font = '11px monospace';
+    ctx.fillText(`${sc.icon} ${name}${tag}: K:${p.kills} D:${p.deaths}`, sbX + 10, 46 + row * 16);
     row++;
   }
 
@@ -756,6 +893,12 @@ function draw() {
 
 function gameLoop() {
   draw();
+  // Animate lobby dots
+  if (inLobby) {
+    const t = Math.floor(Date.now() / 500) % 4;
+    const dotStr = ['• • •', '• •', '• • • •', '• • •'][t];
+    if (lobbyDotsEl.textContent !== dotStr) lobbyDotsEl.textContent = dotStr;
+  }
   requestAnimationFrame(gameLoop);
 }
 requestAnimationFrame(gameLoop);
