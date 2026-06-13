@@ -2,18 +2,65 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>Duck Fight!</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
+  html, body {
     background: #0f0c29;
     display: flex; flex-direction: column;
     justify-content: center; align-items: center;
-    height: 100vh; overflow: hidden;
+    width: 100%; height: 100vh; height: 100dvh;
+    overflow: hidden;
     font-family: monospace; color: #fff;
   }
-  canvas { border: 2px solid #e94560; cursor: crosshair; image-rendering: pixelated; }
+  #game-wrapper {
+    position: relative;
+    width: 100%; flex: 1;
+    display: flex; justify-content: center; align-items: center;
+    overflow: hidden;
+  }
+  canvas {
+    border: 2px solid #e94560;
+    cursor: crosshair;
+    image-rendering: pixelated;
+    display: block;
+    touch-action: none;
+    /* Default: auto-scaled via JS */
+  }
+  #joystick-zone {
+    display: none;
+    position: fixed;
+    left: 20px;
+    bottom: 20px;
+    width: 140px;
+    height: 140px;
+    z-index: 100;
+    pointer-events: auto;
+    touch-action: none;
+  }
+  #joystick-base {
+    position: absolute;
+    width: 140px; height: 140px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.08);
+    border: 3px solid rgba(255,255,255,0.2);
+    box-sizing: border-box;
+  }
+  #joystick-knob {
+    position: absolute;
+    width: 56px; height: 56px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.25);
+    border: 2px solid rgba(255,255,255,0.45);
+    left: 42px; top: 42px;
+    transition: none;
+    box-sizing: border-box;
+  }
+  @media (max-width: 1024px), (hover: none) and (pointer: coarse) {
+    #joystick-zone { display: block; }
+    canvas { cursor: default; }
+  }
   #status {
     margin-bottom: 10px; font-size: 16px;
     padding: 6px 16px; background: #1a1a3e; border-radius: 6px;
@@ -26,13 +73,49 @@
 </head>
 <body>
 <div id="status" class="waiting">Connecting...</div>
-<canvas id="game"></canvas>
+<div id="game-wrapper">
+  <canvas id="game"></canvas>
+</div>
+<div id="joystick-zone">
+  <div id="joystick-base">
+    <div id="joystick-knob"></div>
+  </div>
+</div>
 <script>
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
+const gameWrapper = document.getElementById('game-wrapper');
+
+// Internal resolution is always 960x640 (game world)
 canvas.width = 960;
 canvas.height = 640;
+
+// ── Responsive scaling ──
+function resizeCanvas() {
+  const wrapperW = gameWrapper.clientWidth;
+  const wrapperH = gameWrapper.clientHeight;
+  const gameAspect = 960 / 640; // 1.5
+  const screenAspect = wrapperW / wrapperH;
+
+  let drawW, drawH;
+  if (screenAspect > gameAspect) {
+    // Taller relative to width — fit to height
+    drawH = wrapperH;
+    drawW = drawH * gameAspect;
+  } else {
+    // Wider relative to height — fit to width
+    drawW = wrapperW;
+    drawH = drawW / gameAspect;
+  }
+
+  canvas.style.width = Math.floor(drawW) + 'px';
+  canvas.style.height = Math.floor(drawH) + 'px';
+}
+
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+window.addEventListener('orientationchange', () => setTimeout(resizeCanvas, 150));
 
 // ── WebSocket ──
 const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -190,7 +273,16 @@ ws.onmessage = (e) => {
 // ── Input ──
 let mouse = { x: 480, y: 320, down: false };
 const keys = {};
+let isMobile = false;
 
+// Detect mobile/tablet
+function checkMobile() {
+  isMobile = window.matchMedia('(max-width: 1024px), (hover: none) and (pointer: coarse)').matches;
+}
+checkMobile();
+window.addEventListener('resize', checkMobile);
+
+// ── Desktop mouse input ──
 canvas.addEventListener('mousemove', e => {
   const r = canvas.getBoundingClientRect();
   mouse.x = (e.clientX - r.left) * (canvas.width / r.width);
@@ -202,13 +294,135 @@ canvas.addEventListener('contextmenu', e => e.preventDefault());
 window.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
 window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
 
+// ── Mobile touch: canvas touch = aim + shoot ──
+let aimTouchId = null;
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    // Any touch on the canvas = aim + shoot
+    if (aimTouchId === null) {
+      aimTouchId = t.identifier;
+      const r = canvas.getBoundingClientRect();
+      mouse.x = (t.clientX - r.left) * (canvas.width / r.width);
+      mouse.y = (t.clientY - r.top) * (canvas.height / r.height);
+      mouse.down = true;
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (t.identifier === aimTouchId) {
+      const r = canvas.getBoundingClientRect();
+      mouse.x = (t.clientX - r.left) * (canvas.width / r.width);
+      mouse.y = (t.clientY - r.top) * (canvas.height / r.height);
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchend', e => {
+  for (const t of e.changedTouches) {
+    if (t.identifier === aimTouchId) {
+      aimTouchId = null;
+      mouse.down = false;
+    }
+  }
+});
+canvas.addEventListener('touchcancel', e => {
+  for (const t of e.changedTouches) {
+    if (t.identifier === aimTouchId) {
+      aimTouchId = null;
+      mouse.down = false;
+    }
+  }
+});
+
+// ── Mobile joystick ──
+const joystickZone = document.getElementById('joystick-zone');
+const joystickBase = document.getElementById('joystick-base');
+const joystickKnob = document.getElementById('joystick-knob');
+
+let joystickTouchId = null;
+let joystickInput = { left: false, right: false };
+const JOYSTICK_RADIUS = 70;  // half of base size
+const KNOB_MAX = 40;         // max travel from center
+const DEAD_ZONE = 10;        // pixels before registering input
+
+function resetKnob() {
+  joystickKnob.style.left = '42px';
+  joystickKnob.style.top = '42px';
+  joystickInput.left = false;
+  joystickInput.right = false;
+}
+
+joystickZone.addEventListener('touchstart', e => {
+  e.preventDefault();
+  e.stopPropagation();
+  if (joystickTouchId !== null) return;
+  const t = e.changedTouches[0];
+  joystickTouchId = t.identifier;
+  handleJoystickMove(t);
+}, { passive: false });
+
+joystickZone.addEventListener('touchmove', e => {
+  e.preventDefault();
+  e.stopPropagation();
+  for (const t of e.changedTouches) {
+    if (t.identifier === joystickTouchId) {
+      handleJoystickMove(t);
+    }
+  }
+}, { passive: false });
+
+joystickZone.addEventListener('touchend', e => {
+  for (const t of e.changedTouches) {
+    if (t.identifier === joystickTouchId) {
+      joystickTouchId = null;
+      resetKnob();
+    }
+  }
+});
+joystickZone.addEventListener('touchcancel', e => {
+  for (const t of e.changedTouches) {
+    if (t.identifier === joystickTouchId) {
+      joystickTouchId = null;
+      resetKnob();
+    }
+  }
+});
+
+function handleJoystickMove(touch) {
+  const rect = joystickBase.getBoundingClientRect();
+  const centerX = rect.left + JOYSTICK_RADIUS;
+  const centerY = rect.top + JOYSTICK_RADIUS;
+  let dx = touch.clientX - centerX;
+  let dy = touch.clientY - centerY;
+
+  // Clamp to max radius
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  if (dist > KNOB_MAX) {
+    dx = (dx / dist) * KNOB_MAX;
+    dy = (dy / dist) * KNOB_MAX;
+  }
+
+  // Position knob (knob is 56px, so offset by 28 from center which is 70)
+  joystickKnob.style.left = (JOYSTICK_RADIUS - 28 + dx) + 'px';
+  joystickKnob.style.top = (JOYSTICK_RADIUS - 28 + dy) + 'px';
+
+  // Only horizontal movement matters
+  joystickInput.left = dx < -DEAD_ZONE;
+  joystickInput.right = dx > DEAD_ZONE;
+}
+
 // Send input to server
 setInterval(() => {
   if (!connected || ws.readyState !== 1) return;
   ws.send(JSON.stringify({
     type: 'input',
-    left: keys['a'] || keys['arrowleft'],
-    right: keys['d'] || keys['arrowright'],
+    left: keys['a'] || keys['arrowleft'] || joystickInput.left,
+    right: keys['d'] || keys['arrowright'] || joystickInput.right,
     mx: mouse.x,
     my: mouse.y,
     shoot: mouse.down,
@@ -531,7 +745,11 @@ function draw() {
   // Controls
   ctx.fillStyle = '#aaaacc';
   ctx.font = '13px monospace';
-  ctx.fillText('A/D = Move | SHOOT to fly! 🦆🔫 | Gun recoil = Jump!', 12, canvas.height - 12);
+  if (!isMobile) {
+    ctx.fillText('A/D = Move | SHOOT to fly! 🦆🔫 | Gun recoil = Jump!', 12, canvas.height - 12);
+  } else {
+    ctx.fillText('Joystick = Move | Touch = Aim & Shoot! 🦆🔫', 12, canvas.height - 12);
+  }
 
   ctx.restore();
 }
