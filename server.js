@@ -21,6 +21,7 @@ const SHOOT_COOLDOWN = 8;
 const BULLET_DAMAGE = 5;
 const MAX_HP = 20;
 const RESPAWN_TIME = 3000;
+const SPAWN_DELAY = 3.0;  // seconds a player stays locked at spawn before they can move/shoot
 const MAX_PLAYERS = 4;
 
 // Spawn x positions for slots 0..3
@@ -83,7 +84,8 @@ function createPlayer(id, slot) {
     mouseX: 480, mouseY: 320,
     shooting: false,
     respawnTimer: 0,
-    invulnTimer: 0,  // seconds of invincibility remaining
+    invulnTimer: 1.5,  // invuln for the entire spawn countdown + 1.5s after
+    spawnDelayTimer: SPAWN_DELAY,    // seconds until the player can actually play
   };
 }
 
@@ -97,7 +99,8 @@ function respawnPlayer(p) {
   p.alive = true;
   p.shootCooldown = 0;
   p.recoilTimer = 0;
-  p.invulnTimer = 1.5;  // 1.5 seconds of spawn invincibility
+  p.invulnTimer = 1.5;  // invuln for the entire spawn countdown + 1.5s after
+  p.spawnDelayTimer = SPAWN_DELAY;    // 3s lock before player can move
 }
 
 function promoteFromLobby() {
@@ -333,6 +336,22 @@ function tick() {
     const cy = p.y + p.h / 2 - 8;
     p.gunAngle = Math.atan2(p.mouseY - cy, p.mouseX - cx);
 
+    // Spawn delay: player is locked at spawn, can't move or shoot
+    if (p.spawnDelayTimer > 0) {
+      p.spawnDelayTimer = Math.max(0, p.spawnDelayTimer - (1000 / TICK_RATE) / 1000);
+      // Keep them pinned at spawn during the delay
+      p.vx = 0;
+      p.vy = 0;
+      const spawnX = SPAWN_X[p.slot] !== undefined ? SPAWN_X[p.slot] : 400;
+      p.x = spawnX;
+      p.y = 400;
+      // When delay finishes, fire the spawned event
+      if (p.spawnDelayTimer === 0) {
+        events.push({ type: 'spawned', id });
+      }
+      continue;
+    }
+
     // Movement
     if (p.keys.left) p.vx -= MOVE_SPEED;
     if (p.keys.right) p.vx += MOVE_SPEED;
@@ -490,6 +509,7 @@ function tick() {
       onGround: p.onGround,
       recoilTimer: p.recoilTimer,
       invulnTimer: p.invulnTimer,
+      spawnDelayTimer: p.spawnDelayTimer,
       slot: p.slot,
     };
   }

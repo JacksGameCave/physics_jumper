@@ -3,3 +3,9 @@
    Local:   http://localhost:3000
    Network: http://<your-ip>:3000
 
+Player p0 connected (slot 0)
+Player p1 connected (slot 1)
+Player p2 connected (slot 2)
+Player p3 connected (slot 3)
+Player queued to lobby (#1)
+Player queued to lobby (#2)

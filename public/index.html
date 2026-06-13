@@ -86,6 +86,24 @@
   #lobby-overlay p { font-size: 16px; margin: 4px 0; }
   #lobby-overlay .pos { color: #ffaa00; font-weight: bold; font-size: 22px; margin: 16px 0; }
   #lobby-overlay .dots { font-size: 32px; letter-spacing: 4px; margin-top: 12px; }
+  #spawning-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 12, 41, 0.85);
+    z-index: 600;
+    justify-content: center;
+    align-items: center;
+    flex-direction: column;
+    text-align: center;
+    color: #fff;
+    font-family: monospace;
+    padding: 20px;
+  }
+  #spawning-overlay.show { display: flex; }
+  #spawning-overlay .color { font-size: 44px; font-weight: 900; margin: 8px 0; letter-spacing: 2px; text-shadow: 0 0 20px currentColor; }
+  #spawning-overlay .countdown { font-size: 80px; font-weight: 900; margin-top: 20px; color: #ffcc00; text-shadow: 0 0 30px #ffcc00; transition: transform 0.15s ease-out; }
+  #spawning-overlay .sub { font-size: 18px; margin-top: 12px; color: #aaaacc; }
   .waiting { color: #ffcc00; }
   .connected { color: #2ecc71; }
   .dead { color: #e74c3c; }
@@ -93,6 +111,12 @@
 </head>
 <body>
 <div id="status" class="waiting">Connecting...</div>
+<div id="spawning-overlay">
+  <div class="sub">YOU ARE THE</div>
+  <div class="color" id="spawning-color">??? DUCK</div>
+  <div class="sub">Spawning in</div>
+  <div class="countdown" id="spawning-countdown">3</div>
+</div>
 <div id="lobby-overlay">
   <h1>⏳ IN LOBBY</h1>
   <p>Waiting for a player to die...</p>
@@ -177,6 +201,14 @@ const lobbyOverlay = document.getElementById('lobby-overlay');
 const lobbyPositionEl = document.getElementById('lobby-position');
 const lobbyGameInfoEl = document.getElementById('lobby-gameinfo');
 const lobbyDotsEl = document.getElementById('lobby-dots');
+const spawningOverlay = document.getElementById('spawning-overlay');
+const spawningColorEl = document.getElementById('spawning-color');
+const spawningCountdownEl = document.getElementById('spawning-countdown');
+
+// Spawning countdown state
+let spawningActive = false;
+let spawningStart = 0;
+const SPAWN_COUNTDOWN_MS = 3000;
 
 ws.onopen = () => { statusEl.textContent = 'Connecting...'; statusEl.className = 'waiting'; };
 ws.onclose = () => { statusEl.textContent = 'Disconnected'; statusEl.className = 'dead'; connected = false; };
@@ -192,9 +224,19 @@ ws.onmessage = (e) => {
     connected = true;
     inLobby = false;
     lobbyOverlay.classList.remove('show');
+    // Show spawning overlay for 3s (always shown on fresh join too)
     const sc = slotColor(mySlot);
+    startSpawningCountdown(sc);
     statusEl.textContent = `You are ${sc.icon} ${sc.name} Duck — Waiting for players...`;
     statusEl.className = 'waiting';
+  }
+
+  if (msg.type === 'spawned') {
+    // Server says this player is now playable. Server already granted 1.5s invuln.
+    if (msg.id === myId) {
+      statusEl.textContent = `You are ${slotColor(mySlot).icon} ${slotColor(mySlot).name} Duck — FIGHT!`;
+      statusEl.className = 'connected';
+    }
   }
 
   if (msg.type === 'lobby') {
@@ -223,6 +265,7 @@ ws.onmessage = (e) => {
     if (msg.platforms) platforms = msg.platforms;
     lobbyOverlay.classList.remove('show');
     const sc = slotColor(mySlot);
+    startSpawningCountdown(sc);
     statusEl.textContent = `You are ${sc.icon} ${sc.name} Duck — FIGHT!`;
     statusEl.className = 'connected';
   }
@@ -355,6 +398,26 @@ ws.onmessage = (e) => {
               color: sc.body,
             });
           }
+        }
+      }
+
+      if (ev.type === 'spawned') {
+        // Player is now active and has 1.5s invuln. Play a spawn burst.
+        const sp = msg.players[ev.id];
+        if (sp) {
+          const sc = slotColor(sp.slot);
+          for (let k = 0; k < 18; k++) {
+            const a = Math.random() * Math.PI * 2;
+            const spd = 2 + Math.random() * 4;
+            particles.push({
+              x: sp.x + 24, y: sp.y + 26,
+              vx: Math.cos(a) * spd, vy: Math.sin(a) * spd - 1,
+              life: 18 + Math.random() * 12, maxLife: 30,
+              size: 3 + Math.random() * 3,
+              color: sc.body,
+            });
+          }
+          addShake(3, 4);
         }
       }
     }
@@ -529,6 +592,7 @@ function handleJoystickMove(touch) {
 setInterval(() => {
   if (!connected || ws.readyState !== 1) return;
   if (inLobby) return; // lobby players don't send input
+  if (spawningActive) return; // locked during spawn countdown
   ws.send(JSON.stringify({
     type: 'input',
     left: keys['a'] || keys['arrowleft'] || joystickInput.left,
@@ -891,6 +955,14 @@ function draw() {
   ctx.restore();
 }
 
+function startSpawningCountdown(sc) {
+  spawningColorEl.textContent = `${sc.icon} ${sc.name} DUCK`;
+  spawningColorEl.style.color = sc.body;
+  spawningCountdownEl.textContent = '3';
+  spawningOverlay.classList.add('show');
+  spawningActive = true;
+}
+
 function gameLoop() {
   draw();
   // Animate lobby dots
@@ -898,6 +970,24 @@ function gameLoop() {
     const t = Math.floor(Date.now() / 500) % 4;
     const dotStr = ['• • •', '• •', '• • • •', '• • •'][t];
     if (lobbyDotsEl.textContent !== dotStr) lobbyDotsEl.textContent = dotStr;
+  }
+  // Drive spawning countdown from the server's spawnDelayTimer (authoritative).
+  if (spawningActive && !inLobby && myId && serverState.players && serverState.players[myId]) {
+    const me = serverState.players[myId];
+    if (typeof me.spawnDelayTimer === 'number') {
+      const remaining = Math.max(0, me.spawnDelayTimer);
+      const seconds = Math.ceil(remaining);
+      const label = seconds > 0 ? String(seconds) : 'GO!';
+      if (spawningCountdownEl.textContent !== label) {
+        spawningCountdownEl.textContent = label;
+        spawningCountdownEl.style.transform = 'scale(1.3)';
+        setTimeout(() => { spawningCountdownEl.style.transform = 'scale(1)'; }, 150);
+      }
+      if (remaining <= 0) {
+        spawningActive = false;
+        spawningOverlay.classList.remove('show');
+      }
+    }
   }
   requestAnimationFrame(gameLoop);
 }
