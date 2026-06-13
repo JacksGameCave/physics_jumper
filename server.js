@@ -309,7 +309,7 @@ function tick() {
 
 setInterval(tick, 1000 / TICK_RATE);
 
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`\n🦆 Duck Fight server running!`);
   console.log(`   Local:   http://localhost:${PORT}`);
